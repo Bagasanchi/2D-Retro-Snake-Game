@@ -2,6 +2,7 @@
 #include <raylib.h>
 #include <deque>
 #include <vector>
+#include <cmath>
 #include <raymath.h>
 
 using namespace std;
@@ -44,6 +45,11 @@ bool EventTriggered(double interval){
     }
     return false;
 }
+
+enum class ScreenState{
+    Menu,
+    Playing
+};
 
 class Snake{
 public:
@@ -267,6 +273,40 @@ public:
         }
     }
 
+    bool IsCellBlockedForMove(Vector2 pos){
+        if (pos.x < 0 || pos.x >= cellCount || pos.y < 0 || pos.y >= cellCount) return true;
+        deque<Vector2> bodyToCheck = snake.body;
+        if (!snake.addSegment && !bodyToCheck.empty()){
+            bodyToCheck.pop_back();
+        }
+        if (ElementInDeque(pos, bodyToCheck)) return true;
+        if (ElementInVector(pos, walls)) return true;
+        if (poisonActive && Vector2Equals(pos, poisonPos)) return true;
+        return false;
+    }
+
+    Vector2 ChooseBotDirection(){
+        Vector2 options[4] = {Vector2{1, 0}, Vector2{-1, 0}, Vector2{0, 1}, Vector2{0, -1}};
+        Vector2 bestDir = snake.direction;
+        int bestScore = 1000000;
+
+        for (int i = 0; i < 4; i++){
+            Vector2 dir = options[i];
+            if (Vector2Equals(dir, Vector2Scale(snake.direction, -1))) continue;
+
+            Vector2 nextPos = Vector2Add(snake.body[0], dir);
+            if (IsCellBlockedForMove(nextPos)) continue;
+
+            int score = (int)(abs((int)(food.position.x - nextPos.x)) + abs((int)(food.position.y - nextPos.y)));
+            if (score < bestScore){
+                bestScore = score;
+                bestDir = dir;
+            }
+        }
+
+        return bestDir;
+    }
+
     int CurrentStageGoal() const {
         int index = stage - 1;
         if (index < 0) index = 0;
@@ -404,64 +444,112 @@ int main(){
     SetTargetFPS(60);
 
     Game game = Game();
+    ScreenState screenState = ScreenState::Menu;
+    int menuSelection = 0;
+    bool botMode = false;
 
     while (WindowShouldClose() == false){
         BeginDrawing();
 
-        if (EventTriggered(0.2)){
-            allowMove = true;
-            game.Update();
-        }
+        if (screenState == ScreenState::Menu){
+            if (IsKeyPressed(KEY_W) || IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_S) || IsKeyPressed(KEY_DOWN)){
+                menuSelection = 1 - menuSelection;
+            }
+            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)){
+                botMode = (menuSelection == 1);
+                screenState = ScreenState::Playing;
+                allowMove = false;
+                game.snake.Reset();
+                game.stage = 1;
+                game.applesThisStage = 0;
+                game.moveSpeed = 0.2;
+                game.walls.clear();
+                game.poisonActive = false;
+                game.food.position = game.food.GenerateRandomPos(game.snake.body);
+                game.running = true;
+                game.score = 0;
+            }
 
-        if (EventTriggered(game.moveSpeed)){
-            allowMove = true;
-            game.Update();
+            ClearBackground(green);
+            DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * cellCount + 10, (float)cellSize * cellCount + 10}, 5, darkGreen);
+            DrawText("Retro Snake", offset - 5, 20, 40, darkGreen);
+            int selectModeWidth = MeasureText("Select Mode", 30);
+            DrawText("Select Mode", offset + cellSize * cellCount - selectModeWidth, offset - 40, 30, darkGreen);
+            Color playColor = (menuSelection == 0) ? darkGreen : wallGreen;
+            Color botColor = (menuSelection == 1) ? darkGreen : wallGreen;
+            DrawText("Play", offset + 40, offset + 40, 32, playColor);
+            DrawText("Watch Bot", offset + 40, offset + 90, 32, botColor);
+            DrawText("Enter/Space to start", offset, offset + 150, 20, darkGreen);
         }
+        else{
+            if (IsKeyPressed(KEY_M)){
+                screenState = ScreenState::Menu;
+                allowMove = false;
+                game.running = false;
+            }
 
-        if (IsKeyPressed(KEY_W) && game.snake.direction.y != 1 && allowMove){
-            game.snake.direction = {0, -1};
-            game.running = true;
-            allowMove = false;
-        }else if (IsKeyPressed(KEY_UP) && game.snake.direction.y != 1 && allowMove){
-            game.snake.direction = {0, -1};
-            game.running = true;
-            allowMove = false;
-        }
-        if (IsKeyPressed(KEY_S) && game.snake.direction.y != -1 && allowMove){
-            game.snake.direction = {0, 1};
-            game.running = true;
-            allowMove = false;
-        }else if (IsKeyPressed(KEY_DOWN) && game.snake.direction.y != -1 && allowMove){
-            game.snake.direction = {0, 1};
-            game.running = true;
-            allowMove = false;
-        }
-        if (IsKeyPressed(KEY_A) && game.snake.direction.x != 1 && allowMove){
-            game.snake.direction = {-1, 0};
-            game.running = true;
-            allowMove = false;
-        }else if (IsKeyPressed(KEY_LEFT) && game.snake.direction.x != 1 && allowMove){
-            game.snake.direction = {-1, 0};
-            game.running = true;
-            allowMove = false;
-        }
-        if (IsKeyPressed(KEY_D) && game.snake.direction.x != -1 && allowMove){
-            game.snake.direction = {1, 0};
-            game.running = true;
-            allowMove = false;
-        }else if (IsKeyPressed(KEY_RIGHT) && game.snake.direction.x != -1 && allowMove){
-            game.snake.direction = {1, 0};
-            game.running = true;
-            allowMove = false;
-        }
+            if (EventTriggered(0.2)){
+                allowMove = true;
+                game.Update();
+            }
 
-        // Drawing
-        ClearBackground(green);
-        DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * cellCount + 10, (float)cellSize * cellCount + 10}, 5, darkGreen);
-        DrawText("Retro Snake", offset - 5, 20, 40, darkGreen);
-        DrawText(TextFormat("Stage %i", game.stage), offset + 450, 20, 40, darkGreen);
-        DrawText(TextFormat("%i", game.score), offset - 5, offset + cellSize * cellCount + 10, 40, darkGreen);
-        game.Draw();
+            if (EventTriggered(game.moveSpeed)){
+                allowMove = true;
+                game.Update();
+            }
+
+            if (botMode && allowMove){
+                game.snake.direction = game.ChooseBotDirection();
+                allowMove = false;
+            }
+
+            if (!botMode){
+                if (IsKeyPressed(KEY_W) && game.snake.direction.y != 1 && allowMove){
+                    game.snake.direction = {0, -1};
+                    game.running = true;
+                    allowMove = false;
+                }else if (IsKeyPressed(KEY_UP) && game.snake.direction.y != 1 && allowMove){
+                    game.snake.direction = {0, -1};
+                    game.running = true;
+                    allowMove = false;
+                }
+                if (IsKeyPressed(KEY_S) && game.snake.direction.y != -1 && allowMove){
+                    game.snake.direction = {0, 1};
+                    game.running = true;
+                    allowMove = false;
+                }else if (IsKeyPressed(KEY_DOWN) && game.snake.direction.y != -1 && allowMove){
+                    game.snake.direction = {0, 1};
+                    game.running = true;
+                    allowMove = false;
+                }
+                if (IsKeyPressed(KEY_A) && game.snake.direction.x != 1 && allowMove){
+                    game.snake.direction = {-1, 0};
+                    game.running = true;
+                    allowMove = false;
+                }else if (IsKeyPressed(KEY_LEFT) && game.snake.direction.x != 1 && allowMove){
+                    game.snake.direction = {-1, 0};
+                    game.running = true;
+                    allowMove = false;
+                }
+                if (IsKeyPressed(KEY_D) && game.snake.direction.x != -1 && allowMove){
+                    game.snake.direction = {1, 0};
+                    game.running = true;
+                    allowMove = false;
+                }else if (IsKeyPressed(KEY_RIGHT) && game.snake.direction.x != -1 && allowMove){
+                    game.snake.direction = {1, 0};
+                    game.running = true;
+                    allowMove = false;
+                }
+            }
+
+            // Drawing
+            ClearBackground(green);
+            DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * cellCount + 10, (float)cellSize * cellCount + 10}, 5, darkGreen);
+            DrawText("Retro Snake", offset - 5, 20, 40, darkGreen);
+            DrawText(TextFormat("Stage %i", game.stage), offset + 450, 20, 40, darkGreen);
+            DrawText(TextFormat("%i", game.score), offset - 5, offset + cellSize * cellCount + 10, 40, darkGreen);
+            game.Draw();
+        }
 
         EndDrawing();
     }
