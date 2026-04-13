@@ -16,8 +16,25 @@ Color wallGreen = {90, 110, 50, 255};
 Color poisonRed = {200, 40, 40, 255};
 // Screen and grid settings
 int cellSize = 30;
-int cellCount = 25;
+int cellCountX = 3;
+int cellCountY = 4;
 int offset = 75;
+
+deque<Vector2> BuildInitialSnakeBody(){
+    int startX = cellCountX - 1;
+    if (startX > 2) startX = 2;
+    if (startX < 0) startX = 0;
+
+    int startY = cellCountY / 2;
+    if (startY < 0) startY = 0;
+    if (startY >= cellCountY) startY = cellCountY - 1;
+
+    deque<Vector2> initialBody;
+    initialBody.push_back(Vector2{(float)startX, (float)startY});
+    if (startX - 1 >= 0) initialBody.push_back(Vector2{(float)(startX - 1), (float)startY});
+    if (startX - 2 >= 0) initialBody.push_back(Vector2{(float)(startX - 2), (float)startY});
+    return initialBody;
+}
 // Function to check if a Vector2 element is in a deque of Vector2
 bool ElementInDeque(Vector2 element, deque<Vector2> deque){
     for (unsigned int i = 0; i < deque.size(); i++){
@@ -44,7 +61,7 @@ enum class ScreenState{
 // Everything that has to do with the snake
 class Snake{
 public:
-    deque<Vector2> body = {Vector2{6, 9}, Vector2{5, 9}, Vector2{4, 9}};
+    deque<Vector2> body = BuildInitialSnakeBody();
     deque<Vector2> previousBody = body;
     Vector2 direction = {1, 0};
     bool addSegment = false;
@@ -197,7 +214,7 @@ public:
     }
     // Resets the snake to its starting position and direction
     void Reset(){
-        body = {Vector2{6, 9}, Vector2{5, 9}, Vector2{4, 9}};
+        body = BuildInitialSnakeBody();
         previousBody = body;
         direction = {1, 0};
     }
@@ -275,7 +292,7 @@ public:
     }
     // Checks if a cell is blocked for the bot to move into
     bool IsCellBlockedForMove(Vector2 pos){
-        if (pos.x < 0 || pos.x >= cellCount || pos.y < 0 || pos.y >= cellCount) return true;
+        if (pos.x < 0 || pos.x >= cellCountX || pos.y < 0 || pos.y >= cellCountY) return true;
         deque<Vector2> bodyToCheck = snake.body;
         if (!snake.addSegment && !bodyToCheck.empty()){
             bodyToCheck.pop_back();
@@ -296,7 +313,7 @@ public:
     }
     // Checks if a position is blocked in a hypothetical future state
     bool IsCellBlockedInState(Vector2 pos, const deque<Vector2>& stateBody){
-        if (pos.x < 0 || pos.x >= cellCount || pos.y < 0 || pos.y >= cellCount) return true;
+        if (pos.x < 0 || pos.x >= cellCountX || pos.y < 0 || pos.y >= cellCountY) return true;
         if (ElementInDeque(pos, stateBody)) return true;
         if (ElementInVector(pos, walls)) return true;
         if (poisonActive && Vector2Equals(pos, poisonPos)) return true;
@@ -306,7 +323,7 @@ public:
     int GetPathDistance(Vector2 start, Vector2 target, const deque<Vector2>& stateBody){
         if (Vector2Equals(start, target)) return 0;
 
-        vector<vector<int>> distance(cellCount, vector<int>(cellCount, -1));
+        vector<vector<int>> distance(cellCountY, vector<int>(cellCountX, -1));
         queue<Vector2> bfs;
         bfs.push(start);
         distance[(int)start.y][(int)start.x] = 0;
@@ -320,7 +337,7 @@ public:
             for (int i = 0; i < 4; i++){
                 Vector2 next = Vector2Add(current, options[i]);
 
-                if (next.x < 0 || next.x >= cellCount || next.y < 0 || next.y >= cellCount) continue;
+                if (next.x < 0 || next.x >= cellCountX || next.y < 0 || next.y >= cellCountY) continue;
 
                 int nx = (int)next.x;
                 int ny = (int)next.y;
@@ -343,7 +360,7 @@ public:
     int GetReachableCellCount(Vector2 start, const deque<Vector2>& stateBody){
         if (IsCellBlockedInState(start, stateBody)) return 0;
 
-        vector<vector<bool>> visited(cellCount, vector<bool>(cellCount, false));
+        vector<vector<bool>> visited(cellCountY, vector<bool>(cellCountX, false));
         queue<Vector2> bfs;
         bfs.push(start);
         visited[(int)start.y][(int)start.x] = true;
@@ -358,7 +375,7 @@ public:
 
             for (int i = 0; i < 4; i++){
                 Vector2 next = Vector2Add(current, options[i]);
-                if (next.x < 0 || next.x >= cellCount || next.y < 0 || next.y >= cellCount) continue;
+                if (next.x < 0 || next.x >= cellCountX || next.y < 0 || next.y >= cellCountY) continue;
 
                 int nx = (int)next.x;
                 int ny = (int)next.y;
@@ -445,9 +462,17 @@ public:
     }
     // Generates a random cell position for the walls and poison fruit to spawn in
     Vector2 GenerateRandomCell(){
-        float x = GetRandomValue(0, cellCount - 1);
-        float y = GetRandomValue(0, cellCount - 1);
+        float x = GetRandomValue(0, cellCountX - 1);
+        float y = GetRandomValue(0, cellCountY - 1);
         return Vector2{x, y};
+    }
+    // Gets the number of currently active fruits
+    int GetActiveFruitCount() const{
+        int activeCount = 0;
+        for (unsigned int i = 0; i < fruits.size(); i++){
+            if (fruits[i].active) activeCount++;
+        }
+        return activeCount;
     }
     // Checks if a cell is blocked by the snake body
     bool IsCellBlocked(Vector2 pos, const deque<Vector2>& snakeBody, bool checkFood, bool checkPoison){
@@ -503,7 +528,12 @@ public:
         }
         if (stage >= 2){
             walls.clear();
-            int wallCount = 8 + (stage - 2) * 4;
+            int requestedWallCount = 8 + (stage - 2) * 4;
+            int totalCells = cellCountX * cellCountY;
+            int reservedCells = (int)snake.body.size() + fruitCount + (stage >= 3 ? 1 : 0);
+            int maxSafeWalls = totalCells - reservedCells;
+            if (maxSafeWalls < 0) maxSafeWalls = 0;
+            int wallCount = min(requestedWallCount, maxSafeWalls);
             for (int i = 0; i < wallCount; i++){
                 Vector2 pos = GenerateRandomPos(snake.body, true, true);
                 walls.push_back(pos);
@@ -547,10 +577,10 @@ public:
     }
     // Checks if the snake head is colliding with the edges of the screen
     void CheckCollisionWithEdges(){
-        if (snake.body[0].x == cellCount || snake.body[0].x == -1){
+        if (snake.body[0].x == cellCountX || snake.body[0].x == -1){
             GameOver();
         }
-        if (snake.body[0].y == cellCount || snake.body[0].y == -1){
+        if (snake.body[0].y == cellCountY || snake.body[0].y == -1){
             GameOver();
         }
     }
@@ -618,7 +648,7 @@ public:
 };
 // Main function, initializes the window and game, and contains the main game loop that checks for input, updates the game logic, and draws everything to the screen
 int main(){
-    InitWindow(2 * offset + cellSize * cellCount, 2 * offset + cellSize * cellCount, "Retro Snake");
+    InitWindow(2 * offset + cellSize * cellCountX, 2 * offset + cellSize * cellCountY, "Retro Snake");
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);
 
@@ -659,10 +689,10 @@ int main(){
             }
 
             ClearBackground(green);
-            DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * cellCount + 10, (float)cellSize * cellCount + 10}, 5, darkGreen);
+            DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * cellCountX + 10, (float)cellSize * cellCountY + 10}, 5, darkGreen);
             DrawText("Retro Snake", offset - 5, 20, 40, darkGreen);
             int selectModeWidth = MeasureText("Select Mode", 30);
-            DrawText("Select Mode", offset + cellSize * cellCount - selectModeWidth, offset - 40, 30, darkGreen);
+            DrawText("Select Mode", offset + cellSize * cellCountX - selectModeWidth, offset - 40, 30, darkGreen);
             Color playColor = (menuSelection == 0) ? darkGreen : wallGreen;
             Color botColor = (menuSelection == 1) ? darkGreen : wallGreen;
             DrawText("Play", offset + 40, offset + 40, 32, playColor);
@@ -746,19 +776,19 @@ int main(){
 
             // Drawing
             ClearBackground(green);
-            DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * cellCount + 10, (float)cellSize * cellCount + 10}, 5, darkGreen);
+            DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * cellCountX + 10, (float)cellSize * cellCountY + 10}, 5, darkGreen);
             DrawText("Retro Snake", offset - 5, 20, 40, darkGreen);
             DrawText(TextFormat("Stage %i", game.stage), offset + 450, 20, 40, darkGreen);
-            DrawText(TextFormat("%i", game.score), offset - 5, offset + cellSize * cellCount + 10, 40, darkGreen);
-            DrawText("P to pause/resume", offset + 20, offset + cellSize * cellCount + 18, 20, darkGreen);
-            DrawText("Esc to menu", offset + 250, offset + cellSize * cellCount + 18, 20, darkGreen);
+            DrawText(TextFormat("%i", game.score), offset - 5, offset + cellSize * cellCountY + 10, 40, darkGreen);
+            DrawText("P to pause/resume", offset + 20, offset + cellSize * cellCountY + 18, 20, darkGreen);
+            DrawText("Esc to menu", offset + 250, offset + cellSize * cellCountY + 18, 20, darkGreen);
             if (botMode && !game.running){
-                DrawText("Press Enter to restart bot", offset + 20, offset + cellSize * cellCount + 42, 20, darkGreen);
+                DrawText("Press Enter to restart bot", offset + 20, offset + cellSize * cellCountY + 42, 20, darkGreen);
             }
             if (paused){
                 int pausedWidth = MeasureText("PAUSED", 50);
-                int pausedX = offset + (cellSize * cellCount - pausedWidth) / 2;
-                int pausedY = offset + (cellSize * cellCount - 50) / 2;
+                int pausedX = offset + (cellSize * cellCountX - pausedWidth) / 2;
+                int pausedY = offset + (cellSize * cellCountY - 50) / 2;
                 DrawText("PAUSED", pausedX, pausedY, 50, darkGreen);
             }
             game.Draw(interpolationAlpha);
