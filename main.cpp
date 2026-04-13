@@ -202,47 +202,18 @@ public:
         direction = {1, 0};
     }
 };
-// Everything that has to do with the food
-class Food{
-
-public:
+struct FruitSpawn{
     Vector2 position;
-    Texture2D texture;
-    // Food constructor, spawns the food in a random place except the snake body and loads the food texture
-    Food(deque<Vector2> snakeBody){
-        Image image = LoadImage("Graphics/food.png");
-        texture = LoadTextureFromImage(image);
-        UnloadImage(image);
-        position = GenerateRandomPos(snakeBody);
-    }
-    // Food destructor, unloads the food texture
-    ~Food(){
-        UnloadTexture(texture);
-    }
-    // Draws the food to the screen
-    void Draw(){
-        DrawTexture(texture, offset + position.x * cellSize, offset + position.y * cellSize, WHITE);
-    }
-    // Makes walls and poison fruit
-    Vector2 GenerateRandomCell(){
-        float x = GetRandomValue(0, cellCount - 1);
-        float y = GetRandomValue(0, cellCount - 1);
-        return Vector2{x, y};
-    }
-    // Spawns foods in a random place avoiding the snake body and the rest
-    Vector2 GenerateRandomPos(deque<Vector2> snakeBody){
-        Vector2 position = GenerateRandomCell();
-        while (ElementInDeque(position, snakeBody)){
-            position = GenerateRandomCell();
-        }
-        return position;
-    }
+    int textureIndex;
+    bool active;
 };
 // Everything that has nothing to do with the snake and the fruit
 class Game{
 public:
     Snake snake = Snake();
-    Food food = Food(snake.body);
+    static const int fruitCount = 5;
+    vector<FruitSpawn> fruits;
+    vector<Texture2D> fruitTextures;
     bool running = true;
     int score = 0;
     int stage = 1;
@@ -252,23 +223,42 @@ public:
     vector<Vector2> walls;
     bool poisonActive = false;
     Vector2 poisonPos = {0, 0};
+    Texture2D poisonTexture;
     Sound eatSound;
     Sound wallSound;
     // Game constructor
     Game(){
         InitAudioDevice();
+        const char* fruitPaths[5] = {
+            "Graphics/apple.png",
+            "Graphics/Banana.png",
+            "Graphics/Cherry.png",
+            "Graphics/Peach.png",
+            "Graphics/Watermelon.png"
+        };
+
+        for (int i = 0; i < 5; i++){
+            fruitTextures.push_back(LoadTexture(fruitPaths[i]));
+        }
+
+        poisonTexture = LoadTexture("Graphics/apple.png");
         eatSound = LoadSound("Sounds/eat.mp3");
         wallSound = LoadSound("Sounds/wall.mp3");
+        RelocateFruits();
     }
     // Game destructor
     ~Game(){
+        for (unsigned int i = 0; i < fruitTextures.size(); i++){
+            UnloadTexture(fruitTextures[i]);
+        }
+        UnloadTexture(poisonTexture);
         UnloadSound(eatSound);
         UnloadSound(wallSound);
         CloseAudioDevice();
     }
     // Draws everything that needs to be drawn to the screen
     void Draw(float alpha){
-        food.Draw();
+        DrawFruits();
         DrawWalls();
         DrawPoison();
         snake.Draw(alpha);
@@ -397,7 +387,14 @@ public:
             if (IsCellBlockedForMove(nextPos)) continue;
 
             deque<Vector2> simulatedBody = SimulateBodyAfterMove(dir);
-            int pathDistance = GetPathDistance(nextPos, food.position, simulatedBody);
+            int pathDistance = -1;
+            for (unsigned int fruitIndex = 0; fruitIndex < fruits.size(); fruitIndex++){
+                if (!fruits[fruitIndex].active) continue;
+                int candidateDistance = GetPathDistance(nextPos, fruits[fruitIndex].position, simulatedBody);
+                if (candidateDistance >= 0 && (pathDistance < 0 || candidateDistance < pathDistance)){
+                    pathDistance = candidateDistance;
+                }
+            }
             int openArea = GetReachableCellCount(nextPos, simulatedBody);
             int spaceNeeded = (int)simulatedBody.size();
 
@@ -456,7 +453,7 @@ public:
     bool IsCellBlocked(Vector2 pos, const deque<Vector2>& snakeBody, bool checkFood, bool checkPoison){
         if (ElementInDeque(pos, snakeBody)) return true;
         if (ElementInVector(pos, walls)) return true;
-        if (checkFood && Vector2Equals(pos, food.position)) return true;
+        if (checkFood && IsFruitAtPosition(pos)) return true;
         if (checkPoison && poisonActive && Vector2Equals(pos, poisonPos)) return true;
         return false;
     }
@@ -468,18 +465,34 @@ public:
         }
         return position;
     }
-    // Relocates the food to a new random position, making sure it doesn't spawn on the snake body, walls, or poison fruit
-    void RelocateFood(){
-        food.position = food.GenerateRandomPos(snake.body);
-        while (ElementInVector(food.position, walls) || (poisonActive && Vector2Equals(food.position, poisonPos))){
-            food.position = food.GenerateRandomPos(snake.body);
+    // Checks if a fruit already exists at a given position
+    bool IsFruitAtPosition(Vector2 pos, int ignoreIndex = -1){
+        for (unsigned int i = 0; i < fruits.size(); i++){
+            if ((int)i == ignoreIndex) continue;
+            if (!fruits[i].active) continue;
+            if (Vector2Equals(fruits[i].position, pos)) return true;
+        }
+        return false;
+    }
+    // Respawns all fruits while avoiding snake body, walls, poison fruit and fruit overlap
+    void RelocateFruits(){
+        fruits.clear();
+        for (int i = 0; i < fruitCount; i++){
+            FruitSpawn fruit;
+            fruit.textureIndex = GetRandomValue(0, (int)fruitTextures.size() - 1);
+            fruit.active = true;
+            fruit.position = GenerateRandomPos(snake.body, true, true);
+            while (IsFruitAtPosition(fruit.position)){
+                fruit.position = GenerateRandomPos(snake.body, true, true);
+            }
+            fruits.push_back(fruit);
         }
     }
     // Relocates the poison to a new random position, avoiding snake body, walls, and food
     void RelocatePoison(){
         if (!poisonActive) return;
         poisonPos = GenerateRandomPos(snake.body, true, false);
-        while (ElementInVector(poisonPos, walls) || Vector2Equals(poisonPos, food.position)){
+        while (ElementInVector(poisonPos, walls) || IsFruitAtPosition(poisonPos)){
             poisonPos = GenerateRandomPos(snake.body, true, false);
         }
     }
@@ -505,13 +518,20 @@ public:
             poisonActive = false;
         }
 
-        RelocateFood();
+        RelocateFruits();
     }
     // Checks if the snake head is colliding with the food, and if so, relocates the food, adds a segment to the snake, increases the score and stage progress, and plays the eat sound. Also checks if the stage goal has been reached and if so, advances to the next stage
     void CheckCollisionWithFood(){
-        if (Vector2Equals(snake.body[0], food.position)){
-            RelocateFood();
-            RelocatePoison();
+        int eatenFruitIndex = -1;
+        for (unsigned int i = 0; i < fruits.size(); i++){
+            if (fruits[i].active && Vector2Equals(snake.body[0], fruits[i].position)){
+                eatenFruitIndex = (int)i;
+                break;
+            }
+        }
+
+        if (eatenFruitIndex >= 0){
+            fruits[eatenFruitIndex].active = false;
             snake.addSegment = true;
             score++;
             applesThisStage++;
@@ -551,7 +571,7 @@ public:
         moveSpeed = 0.2;
         walls.clear();
         poisonActive = false;
-        food.position = food.GenerateRandomPos(snake.body);
+        RelocateFruits();
         running = false;
         score = 0;
         PlaySound(wallSound);
@@ -572,17 +592,34 @@ public:
             DrawRectangle(drawX, drawY, cellSize, cellSize, wallGreen);
         }
     }
+    // Draws all fruits to the screen with their corresponding textures
+    void DrawFruits(){
+        for (unsigned int i = 0; i < fruits.size(); i++){
+            if (!fruits[i].active) continue;
+            Texture2D fruitTexture = fruitTextures[fruits[i].textureIndex];
+            int drawX = offset + (int)(fruits[i].position.x * cellSize);
+            int drawY = offset + (int)(fruits[i].position.y * cellSize);
+            Rectangle source = Rectangle{0.0f, 0.0f, (float)fruitTexture.width, (float)fruitTexture.height};
+            Rectangle dest = Rectangle{(float)drawX, (float)drawY, (float)cellSize, (float)cellSize};
+            Vector2 origin = Vector2{0.0f, 0.0f};
+            DrawTexturePro(fruitTexture, source, dest, origin, 0.0f, WHITE);
+        }
+    }
     // Draws the poison fruit to the screen
     void DrawPoison(){
         if (!poisonActive) return;
         int drawX = offset + (int)(poisonPos.x * cellSize);
         int drawY = offset + (int)(poisonPos.y * cellSize);
-        DrawRectangle(drawX, drawY, cellSize, cellSize, poisonRed);
+        Rectangle source = Rectangle{0.0f, 0.0f, (float)poisonTexture.width, (float)poisonTexture.height};
+        Rectangle dest = Rectangle{(float)drawX, (float)drawY, (float)cellSize, (float)cellSize};
+        Vector2 origin = Vector2{0.0f, 0.0f};
+        DrawTexturePro(poisonTexture, source, dest, origin, 0.0f, WHITE);
     }
 };
 // Main function, initializes the window and game, and contains the main game loop that checks for input, updates the game logic, and draws everything to the screen
 int main(){
     InitWindow(2 * offset + cellSize * cellCount, 2 * offset + cellSize * cellCount, "Retro Snake");
+    SetExitKey(KEY_NULL);
     SetTargetFPS(60);
 
     Game game = Game();
@@ -591,6 +628,21 @@ int main(){
     bool botMode = false;
     bool paused = false;
     float movementAccumulator = 0.0f;
+
+    auto StartNewRun = [&](bool startRunning){
+        allowMove = true;
+        game.snake.Reset();
+        game.stage = 1;
+        game.applesThisStage = 0;
+        game.moveSpeed = 0.2;
+        game.walls.clear();
+        game.poisonActive = false;
+        game.RelocateFruits();
+        game.running = startRunning;
+        game.score = 0;
+        paused = false;
+        movementAccumulator = 0.0f;
+    };
 
     while (WindowShouldClose() == false){
         float frameTime = GetFrameTime();
@@ -603,18 +655,7 @@ int main(){
             if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)){
                 botMode = (menuSelection == 1);
                 screenState = ScreenState::Playing;
-                allowMove = true;
-                game.snake.Reset();
-                game.stage = 1;
-                game.applesThisStage = 0;
-                game.moveSpeed = 0.2;
-                game.walls.clear();
-                game.poisonActive = false;
-                game.food.position = game.food.GenerateRandomPos(game.snake.body);
-                game.running = botMode;
-                game.score = 0;
-                paused = false;
-                movementAccumulator = 0.0f;
+                StartNewRun(botMode);
             }
 
             ClearBackground(green);
@@ -629,12 +670,16 @@ int main(){
             DrawText("Enter/Space to start", offset, offset + 150, 20, darkGreen);
         }
         else{
-            if (IsKeyPressed(KEY_M)){
+            if (IsKeyPressed(KEY_M) || IsKeyPressed(KEY_ESCAPE)){
                 screenState = ScreenState::Menu;
                 allowMove = false;
                 game.running = false;
                 paused = false;
                 movementAccumulator = 0.0f;
+            }
+
+            if (botMode && !game.running && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE))){
+                StartNewRun(true);
             }
 
             if (IsKeyPressed(KEY_P) && game.running){
@@ -706,6 +751,10 @@ int main(){
             DrawText(TextFormat("Stage %i", game.stage), offset + 450, 20, 40, darkGreen);
             DrawText(TextFormat("%i", game.score), offset - 5, offset + cellSize * cellCount + 10, 40, darkGreen);
             DrawText("P to pause/resume", offset + 20, offset + cellSize * cellCount + 18, 20, darkGreen);
+            DrawText("Esc to menu", offset + 250, offset + cellSize * cellCount + 18, 20, darkGreen);
+            if (botMode && !game.running){
+                DrawText("Press Enter to restart bot", offset + 20, offset + cellSize * cellCount + 42, 20, darkGreen);
+            }
             if (paused){
                 int pausedWidth = MeasureText("PAUSED", 50);
                 int pausedX = offset + (cellSize * cellCount - pausedWidth) / 2;
