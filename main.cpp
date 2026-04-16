@@ -19,6 +19,22 @@ int cellSize = 30;
 int cellCountX = 3;
 int cellCountY = 4;
 int offset = 75;
+const int minMapWidth = 3;
+const int minMapHeight = 4;
+const int maxMapWidth = 30;
+const int maxMapHeight = 30;
+
+bool IsExcludedClassicSize(int width, int height){
+    return width == 10 && height == 9;
+}
+
+void ClampClassicSize(int& width, int& height){
+    width = max(minMapWidth, min(maxMapWidth, width));
+    height = max(minMapHeight, min(maxMapHeight, height));
+    if (IsExcludedClassicSize(width, height)){
+        height = max(minMapHeight, height - 1);
+    }
+}
 
 deque<Vector2> BuildInitialSnakeBody(){
     int startX = cellCountX - 1;
@@ -57,6 +73,11 @@ bool ElementInVector(Vector2 element, const vector<Vector2>& vec){
 enum class ScreenState{
     Menu,
     Playing
+};
+
+enum class MapMode{
+    Expanding,
+    Classic
 };
 // Everything that has to do with the snake
 class Snake{
@@ -228,7 +249,7 @@ struct FruitSpawn{
 class Game{
 public:
     Snake snake = Snake();
-    static const int fruitCount = 5;
+    static constexpr int fruitCount = 5;
     vector<FruitSpawn> fruits;
     vector<Texture2D> fruitTextures;
     bool running = true;
@@ -236,6 +257,7 @@ public:
     int stage = 1;
     int applesThisStage = 0;
     int stageGoals[3] = {5, 5, 5};
+    int stageTarget = 5;
     double moveSpeed = 0.2;
     vector<Vector2> walls;
     bool poisonActive = false;
@@ -243,6 +265,23 @@ public:
     Texture2D poisonTexture;
     Sound eatSound;
     Sound wallSound;
+    MapMode mapMode = MapMode::Expanding;
+    int classicMapWidth = minMapWidth;
+    int classicMapHeight = minMapHeight;
+    // Updates map dimensions based on the selected map mode.
+    void UpdateMapSizeForStage(){
+        if (mapMode == MapMode::Classic){
+            ClampClassicSize(classicMapWidth, classicMapHeight);
+            cellCountX = classicMapWidth;
+            cellCountY = classicMapHeight;
+            return;
+        }
+
+        int stageOffset = stage - 1;
+        if (stageOffset < 0) stageOffset = 0;
+        cellCountX = minMapWidth + stageOffset;
+        cellCountY = minMapHeight + stageOffset;
+    }
     // Game constructor
     Game(){
         InitAudioDevice();
@@ -261,6 +300,7 @@ public:
         poisonTexture = LoadTexture("Graphics/apple.png");
         eatSound = LoadSound("Sounds/eat.mp3");
         wallSound = LoadSound("Sounds/wall.mp3");
+        UpdateMapSizeForStage();
         RelocateFruits();
     }
     // Game destructor
@@ -466,14 +506,6 @@ public:
         float y = GetRandomValue(0, cellCountY - 1);
         return Vector2{x, y};
     }
-    // Gets the number of currently active fruits
-    int GetActiveFruitCount() const{
-        int activeCount = 0;
-        for (unsigned int i = 0; i < fruits.size(); i++){
-            if (fruits[i].active) activeCount++;
-        }
-        return activeCount;
-    }
     // Checks if a cell is blocked by the snake body
     bool IsCellBlocked(Vector2 pos, const deque<Vector2>& snakeBody, bool checkFood, bool checkPoison){
         if (ElementInDeque(pos, snakeBody)) return true;
@@ -502,7 +534,12 @@ public:
     // Respawns all fruits while avoiding snake body, walls, poison fruit and fruit overlap
     void RelocateFruits(){
         fruits.clear();
-        for (int i = 0; i < fruitCount; i++){
+        int totalCells = cellCountX * cellCountY;
+        int availableCells = totalCells - (int)snake.body.size() - (int)walls.size() - (poisonActive ? 1 : 0);
+        if (availableCells < 0) availableCells = 0;
+        int spawnCount = min(fruitCount, availableCells);
+
+        for (int i = 0; i < spawnCount; i++){
             FruitSpawn fruit;
             fruit.textureIndex = GetRandomValue(0, (int)fruitTextures.size() - 1);
             fruit.active = true;
@@ -512,6 +549,8 @@ public:
             }
             fruits.push_back(fruit);
         }
+
+        stageTarget = min(CurrentStageGoal(), (int)fruits.size());
     }
     // Relocates the poison to a new random position, avoiding snake body, walls, and food
     void RelocatePoison(){
@@ -523,11 +562,10 @@ public:
     }
     // Builds the stage by adding walls and poison fruit based on the current stage, and relocates the food
     void BuildStage(){
-        if (stage < 2){
-            walls.clear();
-        }
-        if (stage >= 2){
-            walls.clear();
+        UpdateMapSizeForStage();
+
+        walls.clear();
+        if (mapMode == MapMode::Classic && stage >= 2){
             int requestedWallCount = 8 + (stage - 2) * 4;
             int totalCells = cellCountX * cellCountY;
             int reservedCells = (int)snake.body.size() + fruitCount + (stage >= 3 ? 1 : 0);
@@ -567,7 +605,7 @@ public:
             applesThisStage++;
             PlaySound(eatSound);
         }
-        if(applesThisStage >= CurrentStageGoal()){
+        if(stageTarget > 0 && applesThisStage >= stageTarget){
             stage++;
             applesThisStage = 0;
             moveSpeed = max(0.06, moveSpeed * 0.9);
@@ -595,9 +633,11 @@ public:
     }
     // Resets the game to the starting conditions of stage 1
     void GameOver(){
-        snake.Reset();
         stage = 1;
+        UpdateMapSizeForStage();
+        snake.Reset();
         applesThisStage = 0;
+        stageTarget = stageGoals[0];
         moveSpeed = 0.2;
         walls.clear();
         poisonActive = false;
@@ -646,9 +686,15 @@ public:
         DrawTexturePro(poisonTexture, source, dest, origin, 0.0f, WHITE);
     }
 };
+
+constexpr int Game::fruitCount;
+
 // Main function, initializes the window and game, and contains the main game loop that checks for input, updates the game logic, and draws everything to the screen
 int main(){
-    InitWindow(2 * offset + cellSize * cellCountX, 2 * offset + cellSize * cellCountY, "Retro Snake");
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    int screenWidth = 1000;
+    int screenHeight = 700;
+    InitWindow(screenWidth, screenHeight, "Retro Snake");
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);
 
@@ -656,13 +702,20 @@ int main(){
     ScreenState screenState = ScreenState::Menu;
     int menuSelection = 0;
     bool botMode = false;
+    MapMode selectedMapMode = MapMode::Expanding;
+    int selectedClassicMapWidth = minMapWidth;
+    int selectedClassicMapHeight = minMapHeight;
     bool paused = false;
     float movementAccumulator = 0.0f;
 
-    auto StartNewRun = [&](bool startRunning){
+    auto StartNewRun = [&](bool startRunning, MapMode mode){
         allowMove = true;
-        game.snake.Reset();
+        game.mapMode = mode;
+        game.classicMapWidth = selectedClassicMapWidth;
+        game.classicMapHeight = selectedClassicMapHeight;
         game.stage = 1;
+        game.UpdateMapSizeForStage();
+        game.snake.Reset();
         game.applesThisStage = 0;
         game.moveSpeed = 0.2;
         game.walls.clear();
@@ -674,6 +727,12 @@ int main(){
         movementAccumulator = 0.0f;
     };
 
+    auto DrawCenteredText = [&](const char* text, int y, int fontSize, Color color){
+        int textWidth = MeasureText(text, fontSize);
+        int x = (GetScreenWidth() - textWidth) / 2;
+        DrawText(text, x, y, fontSize, color);
+    };
+
     while (WindowShouldClose() == false){
         float frameTime = GetFrameTime();
         BeginDrawing();
@@ -682,26 +741,59 @@ int main(){
             if (IsKeyPressed(KEY_W) || IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_S) || IsKeyPressed(KEY_DOWN)){
                 menuSelection = 1 - menuSelection;
             }
+            if (IsKeyPressed(KEY_A) || IsKeyPressed(KEY_LEFT)){
+                selectedMapMode = MapMode::Classic;
+            }
+            if (IsKeyPressed(KEY_D) || IsKeyPressed(KEY_RIGHT)){
+                selectedMapMode = MapMode::Expanding;
+            }
+            if (selectedMapMode == MapMode::Classic){
+                if (IsKeyPressed(KEY_Q)){
+                    selectedClassicMapWidth = max(minMapWidth, selectedClassicMapWidth - 1);
+                }
+                if (IsKeyPressed(KEY_E)){
+                    selectedClassicMapWidth = min(maxMapWidth, selectedClassicMapWidth + 1);
+                }
+                if (IsKeyPressed(KEY_Z)){
+                    selectedClassicMapHeight = max(minMapHeight, selectedClassicMapHeight - 1);
+                }
+                if (IsKeyPressed(KEY_C)){
+                    selectedClassicMapHeight = min(maxMapHeight, selectedClassicMapHeight + 1);
+                }
+
+                ClampClassicSize(selectedClassicMapWidth, selectedClassicMapHeight);
+            }
             if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)){
                 botMode = (menuSelection == 1);
                 screenState = ScreenState::Playing;
-                StartNewRun(botMode);
+                StartNewRun(botMode, selectedMapMode);
             }
 
+            int menuMapWidth = (selectedMapMode == MapMode::Classic) ? selectedClassicMapWidth : minMapWidth;
+            int menuMapHeight = (selectedMapMode == MapMode::Classic) ? selectedClassicMapHeight : minMapHeight;
+
             ClearBackground(green);
-            DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * cellCountX + 10, (float)cellSize * cellCountY + 10}, 5, darkGreen);
-            DrawText("Retro Snake", offset - 5, 20, 40, darkGreen);
-            int selectModeWidth = MeasureText("Select Mode", 30);
-            DrawText("Select Mode", offset + cellSize * cellCountX - selectModeWidth, offset - 40, 30, darkGreen);
+            DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * menuMapWidth + 10, (float)cellSize * menuMapHeight + 10}, 5, darkGreen);
+            int menuCenterY = GetScreenHeight() / 2;
+            DrawCenteredText("Retro Snake", menuCenterY - 200, 52, darkGreen);
+            DrawCenteredText("Select Mode", menuCenterY - 145, 30, darkGreen);
             Color playColor = (menuSelection == 0) ? darkGreen : wallGreen;
             Color botColor = (menuSelection == 1) ? darkGreen : wallGreen;
-            DrawText("Play", offset + 40, offset + 40, 32, playColor);
-            DrawText("Watch Bot", offset + 40, offset + 90, 32, botColor);
-            DrawText("Enter/Space to start", offset, offset + 150, 20, darkGreen);
+            DrawCenteredText("Play", menuCenterY - 95, 32, playColor);
+            DrawCenteredText("Watch Bot", menuCenterY - 50, 32, botColor);
+            DrawCenteredText("Enter/Space to start", menuCenterY - 8, 20, darkGreen);
+            const char* modeLabel = (selectedMapMode == MapMode::Expanding) ? "Expanding Map" : "Classic Map";
+            DrawCenteredText(TextFormat("Map Mode: %s", modeLabel), menuCenterY + 36, 28, darkGreen);
+            DrawCenteredText("A/Left: Classic   D/Right: Expanding", menuCenterY + 74, 20, darkGreen);
+            DrawCenteredText(TextFormat("Classic Size: %ix%i", selectedClassicMapWidth, selectedClassicMapHeight), menuCenterY + 105, 24, darkGreen);
+            DrawCenteredText("Q/E width  Z/C height", menuCenterY + 138, 20, darkGreen);
         }
         else{
             if (IsKeyPressed(KEY_M) || IsKeyPressed(KEY_ESCAPE)){
                 screenState = ScreenState::Menu;
+                selectedMapMode = game.mapMode;
+                selectedClassicMapWidth = game.classicMapWidth;
+                selectedClassicMapHeight = game.classicMapHeight;
                 allowMove = false;
                 game.running = false;
                 paused = false;
@@ -709,7 +801,7 @@ int main(){
             }
 
             if (botMode && !game.running && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE))){
-                StartNewRun(true);
+                StartNewRun(true, game.mapMode);
             }
 
             if (IsKeyPressed(KEY_P) && game.running){
@@ -777,18 +869,19 @@ int main(){
             // Drawing
             ClearBackground(green);
             DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * cellCountX + 10, (float)cellSize * cellCountY + 10}, 5, darkGreen);
-            DrawText("Retro Snake", offset - 5, 20, 40, darkGreen);
-            DrawText(TextFormat("Stage %i", game.stage), offset + 450, 20, 40, darkGreen);
-            DrawText(TextFormat("%i", game.score), offset - 5, offset + cellSize * cellCountY + 10, 40, darkGreen);
-            DrawText("P to pause/resume", offset + 20, offset + cellSize * cellCountY + 18, 20, darkGreen);
-            DrawText("Esc to menu", offset + 250, offset + cellSize * cellCountY + 18, 20, darkGreen);
+            DrawCenteredText("Retro Snake", 20, 40, darkGreen);
+            DrawCenteredText(TextFormat("Stage %i", game.stage), 65, 34, darkGreen);
+            DrawCenteredText((game.mapMode == MapMode::Expanding) ? "Expanding" : "Classic", 102, 24, darkGreen);
+            DrawCenteredText(TextFormat("Map %ix%i", cellCountX, cellCountY), 132, 24, darkGreen);
+            DrawCenteredText(TextFormat("Score %i", game.score), GetScreenHeight() - 90, 34, darkGreen);
+            DrawCenteredText("P to pause/resume   Esc to menu", GetScreenHeight() - 52, 20, darkGreen);
             if (botMode && !game.running){
-                DrawText("Press Enter to restart bot", offset + 20, offset + cellSize * cellCountY + 42, 20, darkGreen);
+                DrawCenteredText("Press Enter to restart bot", GetScreenHeight() - 26, 20, darkGreen);
             }
             if (paused){
                 int pausedWidth = MeasureText("PAUSED", 50);
-                int pausedX = offset + (cellSize * cellCountX - pausedWidth) / 2;
-                int pausedY = offset + (cellSize * cellCountY - 50) / 2;
+                int pausedX = (GetScreenWidth() - pausedWidth) / 2;
+                int pausedY = (GetScreenHeight() - 50) / 2;
                 DrawText("PAUSED", pausedX, pausedY, 50, darkGreen);
             }
             game.Draw(interpolationAlpha);
