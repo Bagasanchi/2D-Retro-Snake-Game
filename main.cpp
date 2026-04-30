@@ -4,6 +4,7 @@
 #include <vector>
 #include <queue>
 #include <cmath>
+#include <algorithm>
 #include <raymath.h>
 
 using namespace std;
@@ -21,8 +22,8 @@ int cellCountY = 4;
 int offset = 75;
 const int minMapWidth = 3;
 const int minMapHeight = 4;
-const int maxMapWidth = 30;
-const int maxMapHeight = 30;
+const int maxMapWidth = 60;
+const int maxMapHeight = 35;
 
 bool IsExcludedClassicSize(int width, int height){
     return width == 10 && height == 9;
@@ -52,7 +53,7 @@ deque<Vector2> BuildInitialSnakeBody(){
     return initialBody;
 }
 // Function to check if a Vector2 element is in a deque of Vector2
-bool ElementInDeque(Vector2 element, deque<Vector2> deque){
+bool ElementInDeque(Vector2 element, const deque<Vector2>& deque){
     for (unsigned int i = 0; i < deque.size(); i++){
         if (Vector2Equals(deque[i], element)){
             return true;
@@ -268,6 +269,11 @@ public:
     MapMode mapMode = MapMode::Expanding;
     int classicMapWidth = minMapWidth;
     int classicMapHeight = minMapHeight;
+    static constexpr int lookaheadCellThreshold = 1200;
+    deque<Vector2> botRecentHeadCells;
+    int botTrackedApples = 0;
+    int botTrackedStage = 1;
+    int botStepsSinceApple = 0;
     // Updates map dimensions based on the selected map mode.
     void UpdateMapSizeForStage(){
         if (mapMode == MapMode::Classic){
@@ -328,6 +334,9 @@ public:
             CheckCollisionWithEdges();
             CheckCollisionWithWalls();
             CheckCollisionWithTail();
+            if (running){
+                UpdateBotLoopState();
+            }
         }
     }
     // Checks if a cell is blocked for the bot to move into
@@ -351,19 +360,75 @@ public:
         }
         return simulated;
     }
-    // Checks if a position is blocked in a hypothetical future state
-    bool IsCellBlockedInState(Vector2 pos, const deque<Vector2>& stateBody){
-        if (pos.x < 0 || pos.x >= cellCountX || pos.y < 0 || pos.y >= cellCountY) return true;
-        if (ElementInDeque(pos, stateBody)) return true;
-        if (ElementInVector(pos, walls)) return true;
-        if (poisonActive && Vector2Equals(pos, poisonPos)) return true;
+    // Builds a lightweight snapshot of currently active fruits for bot simulation.
+    vector<bool> BuildFruitActiveState() const {
+        vector<bool> activeState(fruits.size(), false);
+        for (unsigned int i = 0; i < fruits.size(); i++){
+            activeState[i] = fruits[i].active;
+        }
+        return activeState;
+    }
+    // Checks whether at least one fruit remains active in a simulated state.
+    bool HasAnyActiveFruit(const vector<bool>& fruitActiveState) const {
+        for (unsigned int i = 0; i < fruitActiveState.size(); i++){
+            if (fruitActiveState[i]) return true;
+        }
         return false;
     }
-    // Checks if a move target is blocked for a given hypothetical state
-    bool IsCellBlockedForMoveInState(Vector2 pos, const deque<Vector2>& stateBody){
+    // Tracks recent head cells so the bot can avoid getting stuck in loops.
+    void UpdateBotLoopState(){
+        if (snake.body.empty()) return;
+
+        if (stage != botTrackedStage || applesThisStage < botTrackedApples){
+            botRecentHeadCells.clear();
+            botStepsSinceApple = 0;
+        }
+
+        if (applesThisStage > botTrackedApples){
+            botStepsSinceApple = 0;
+        }
+        else{
+            botStepsSinceApple++;
+        }
+
+        botTrackedApples = applesThisStage;
+        botTrackedStage = stage;
+
+        botRecentHeadCells.push_back(snake.body[0]);
+        const unsigned int maxHistory = 28;
+        if (botRecentHeadCells.size() > maxHistory){
+            botRecentHeadCells.pop_front();
+        }
+    }
+    // Counts how often a cell appears in the recent movement history.
+    int CountRecentVisits(Vector2 pos, int lookback) const {
+        int visits = 0;
+        int historySize = (int)botRecentHeadCells.size();
+        int startIndex = historySize - lookback;
+        if (startIndex < 0) startIndex = 0;
+
+        for (int i = startIndex; i < historySize; i++){
+            if (Vector2Equals(botRecentHeadCells[i], pos)){
+                visits++;
+            }
+        }
+
+        return visits;
+    }
+    // Finds an active fruit index at a position using a simulated fruit state.
+    int GetActiveFruitIndexAtPosition(Vector2 pos, const vector<bool>& fruitActiveState) const {
+        for (unsigned int i = 0; i < fruits.size(); i++){
+            if (!fruitActiveState[i]) continue;
+            if (Vector2Equals(fruits[i].position, pos)) return (int)i;
+        }
+        return -1;
+    }
+    // Checks if a move target is blocked for a given hypothetical state.
+    // pendingGrowth mirrors snake.addSegment: if true, the tail does not move this turn.
+    bool IsCellBlockedForMoveInState(Vector2 pos, const deque<Vector2>& stateBody, bool pendingGrowth){
         if (pos.x < 0 || pos.x >= cellCountX || pos.y < 0 || pos.y >= cellCountY) return true;
         deque<Vector2> bodyToCheck = stateBody;
-        if (!bodyToCheck.empty()){
+        if (!pendingGrowth && !bodyToCheck.empty()){
             bodyToCheck.pop_back();
         }
         if (ElementInDeque(pos, bodyToCheck)) return true;
@@ -371,19 +436,94 @@ public:
         if (poisonActive && Vector2Equals(pos, poisonPos)) return true;
         return false;
     }
-    // Simulates one move in a hypothetical state (no growth assumption)
-    deque<Vector2> SimulateBodyAfterMoveInState(const deque<Vector2>& stateBody, Vector2 dir){
+    // Simulates one move in a hypothetical state, honoring pending growth behavior.
+    deque<Vector2> SimulateBodyAfterMoveInState(const deque<Vector2>& stateBody, Vector2 dir, bool pendingGrowth){
         deque<Vector2> simulated = stateBody;
         if (simulated.empty()) return simulated;
         simulated.push_front(Vector2Add(stateBody[0], dir));
-        simulated.pop_back();
+        if (!pendingGrowth){
+            simulated.pop_back();
+        }
         return simulated;
+    }
+    // Chooses a preferred fruit target, prioritizing reachable fruits over merely close ones.
+    bool GetPreferredFruitTarget(Vector2 from, const deque<Vector2>& stateBody, const vector<bool>& fruitActiveState, Vector2& targetOut, int& pathDistanceOut){
+        vector<pair<int, int>> fruitOrder;
+        for (unsigned int i = 0; i < fruits.size(); i++){
+            if (!fruitActiveState[i]) continue;
+
+            int dx = (int)fabsf(fruits[i].position.x - from.x);
+            int dy = (int)fabsf(fruits[i].position.y - from.y);
+            fruitOrder.push_back(pair<int, int>{dx + dy, (int)i});
+        }
+
+        if (fruitOrder.empty()) return false;
+
+        sort(fruitOrder.begin(), fruitOrder.end(), [](const pair<int, int>& a, const pair<int, int>& b){
+            return a.first < b.first;
+        });
+
+        bool foundReachable = false;
+        int bestPathDistance = -1;
+        int bestManhattan = 0;
+
+        for (unsigned int i = 0; i < fruitOrder.size(); i++){
+            int fruitIndex = fruitOrder[i].second;
+            int candidatePath = GetPathDistance(from, fruits[fruitIndex].position, stateBody);
+            if (candidatePath < 0) continue;
+
+            if (!foundReachable || candidatePath < bestPathDistance || (candidatePath == bestPathDistance && fruitOrder[i].first < bestManhattan)){
+                bestPathDistance = candidatePath;
+                bestManhattan = fruitOrder[i].first;
+                targetOut = fruits[fruitIndex].position;
+                foundReachable = true;
+            }
+        }
+
+        if (foundReachable){
+            pathDistanceOut = bestPathDistance;
+            return true;
+        }
+
+        targetOut = fruits[fruitOrder[0].second].position;
+        pathDistanceOut = -1;
+        return true;
     }
     // Shortest path distance between two cells in a hypothetical future state
     int GetPathDistance(Vector2 start, Vector2 target, const deque<Vector2>& stateBody){
         if (Vector2Equals(start, target)) return 0;
 
         vector<vector<int>> distance(cellCountY, vector<int>(cellCountX, -1));
+        vector<vector<bool>> blocked(cellCountY, vector<bool>(cellCountX, false));
+
+        for (unsigned int i = 0; i < walls.size(); i++){
+            int wx = (int)walls[i].x;
+            int wy = (int)walls[i].y;
+            if (wx >= 0 && wx < cellCountX && wy >= 0 && wy < cellCountY){
+                blocked[wy][wx] = true;
+            }
+        }
+
+        if (poisonActive){
+            int px = (int)poisonPos.x;
+            int py = (int)poisonPos.y;
+            if (px >= 0 && px < cellCountX && py >= 0 && py < cellCountY){
+                blocked[py][px] = true;
+            }
+        }
+
+        for (unsigned int i = 0; i < stateBody.size(); i++){
+            int bx = (int)stateBody[i].x;
+            int by = (int)stateBody[i].y;
+            if (bx >= 0 && bx < cellCountX && by >= 0 && by < cellCountY){
+                blocked[by][bx] = true;
+            }
+        }
+
+        // The start and target cells are intentional endpoints and should stay traversable.
+        blocked[(int)start.y][(int)start.x] = false;
+        blocked[(int)target.y][(int)target.x] = false;
+
         queue<Vector2> bfs;
         bfs.push(start);
         distance[(int)start.y][(int)start.x] = 0;
@@ -403,7 +543,7 @@ public:
                 int ny = (int)next.y;
                 if (distance[ny][nx] != -1) continue;
 
-                if (IsCellBlockedInState(next, stateBody) && !Vector2Equals(next, target)) continue;
+                if (blocked[ny][nx]) continue;
 
                 distance[ny][nx] = distance[(int)current.y][(int)current.x] + 1;
                 if (Vector2Equals(next, target)){
@@ -418,7 +558,35 @@ public:
     }
     // Counts how much open space is reachable from a cell in a hypothetical future state
     int GetReachableCellCount(Vector2 start, const deque<Vector2>& stateBody){
-        if (IsCellBlockedInState(start, stateBody)) return 0;
+        vector<vector<bool>> blocked(cellCountY, vector<bool>(cellCountX, false));
+
+        for (unsigned int i = 0; i < walls.size(); i++){
+            int wx = (int)walls[i].x;
+            int wy = (int)walls[i].y;
+            if (wx >= 0 && wx < cellCountX && wy >= 0 && wy < cellCountY){
+                blocked[wy][wx] = true;
+            }
+        }
+
+        if (poisonActive){
+            int px = (int)poisonPos.x;
+            int py = (int)poisonPos.y;
+            if (px >= 0 && px < cellCountX && py >= 0 && py < cellCountY){
+                blocked[py][px] = true;
+            }
+        }
+
+        for (unsigned int i = 0; i < stateBody.size(); i++){
+            int bx = (int)stateBody[i].x;
+            int by = (int)stateBody[i].y;
+            if (bx >= 0 && bx < cellCountX && by >= 0 && by < cellCountY){
+                blocked[by][bx] = true;
+            }
+        }
+
+        blocked[(int)start.y][(int)start.x] = false;
+
+        if (blocked[(int)start.y][(int)start.x]) return 0;
 
         vector<vector<bool>> visited(cellCountY, vector<bool>(cellCountX, false));
         queue<Vector2> bfs;
@@ -440,7 +608,7 @@ public:
                 int nx = (int)next.x;
                 int ny = (int)next.y;
                 if (visited[ny][nx]) continue;
-                if (IsCellBlockedInState(next, stateBody)) continue;
+                if (blocked[ny][nx]) continue;
 
                 visited[ny][nx] = true;
                 bfs.push(next);
@@ -450,7 +618,7 @@ public:
         return reachable;
     }
     // Counts safe options available on the next turn from a hypothetical state
-    int CountSafeNextMoves(const deque<Vector2>& stateBody, Vector2 stateDirection){
+    int CountSafeNextMoves(const deque<Vector2>& stateBody, Vector2 stateDirection, bool pendingGrowth){
         Vector2 options[4] = {Vector2{1, 0}, Vector2{-1, 0}, Vector2{0, 1}, Vector2{0, -1}};
         int safeMoves = 0;
 
@@ -459,7 +627,7 @@ public:
             if (Vector2Equals(dir, Vector2Scale(stateDirection, -1))) continue;
 
             Vector2 nextPos = Vector2Add(stateBody[0], dir);
-            if (IsCellBlockedForMoveInState(nextPos, stateBody)) continue;
+            if (IsCellBlockedForMoveInState(nextPos, stateBody, pendingGrowth)) continue;
 
             safeMoves++;
         }
@@ -467,7 +635,7 @@ public:
         return safeMoves;
     }
     // Estimates the best move quality one turn ahead from a hypothetical state
-    int EvaluateFutureBestScore(const deque<Vector2>& stateBody, Vector2 stateDirection){
+    int EvaluateFutureBestScore(const deque<Vector2>& stateBody, Vector2 stateDirection, bool pendingGrowth, const vector<bool>& fruitActiveState){
         if (stateBody.empty()) return 100000;
 
         Vector2 options[4] = {Vector2{1, 0}, Vector2{-1, 0}, Vector2{0, 1}, Vector2{0, -1}};
@@ -479,34 +647,52 @@ public:
             if (Vector2Equals(dir, Vector2Scale(stateDirection, -1))) continue;
 
             Vector2 nextPos = Vector2Add(stateBody[0], dir);
-            if (IsCellBlockedForMoveInState(nextPos, stateBody)) continue;
+            if (IsCellBlockedForMoveInState(nextPos, stateBody, pendingGrowth)) continue;
 
-            deque<Vector2> nextBody = SimulateBodyAfterMoveInState(stateBody, dir);
+            deque<Vector2> nextBody = SimulateBodyAfterMoveInState(stateBody, dir, pendingGrowth);
             if (nextBody.empty()) continue;
 
-            int pathDistance = -1;
-            for (unsigned int fruitIndex = 0; fruitIndex < fruits.size(); fruitIndex++){
-                if (!fruits[fruitIndex].active) continue;
-                int candidateDistance = GetPathDistance(nextPos, fruits[fruitIndex].position, nextBody);
-                if (candidateDistance >= 0 && (pathDistance < 0 || candidateDistance < pathDistance)){
-                    pathDistance = candidateDistance;
-                }
+            vector<bool> nextFruitActiveState = fruitActiveState;
+            bool nextPendingGrowth = false;
+            bool ateFruitNow = false;
+            int eatenFruitIndex = GetActiveFruitIndexAtPosition(nextPos, nextFruitActiveState);
+            if (eatenFruitIndex >= 0){
+                nextFruitActiveState[eatenFruitIndex] = false;
+                nextPendingGrowth = true;
+                ateFruitNow = true;
             }
+            bool hasRemainingFruit = HasAnyActiveFruit(nextFruitActiveState);
+
+            int pathDistance = -1;
+            Vector2 preferredFruitTarget = {0, 0};
+            GetPreferredFruitTarget(nextPos, nextBody, nextFruitActiveState, preferredFruitTarget, pathDistance);
 
             int openArea = GetReachableCellCount(nextPos, nextBody);
             int tailDistance = GetPathDistance(nextPos, nextBody.back(), nextBody);
-            int safeNextMoves = CountSafeNextMoves(nextBody, dir);
+            int safeNextMoves = CountSafeNextMoves(nextBody, dir, nextPendingGrowth);
 
             int score = 0;
             if (pathDistance >= 0){
                 score += pathDistance * 16;
             }
+            else if (hasRemainingFruit){
+                score += (tailDistance >= 0) ? 1500 : 2200;
+            }
             else{
-                score += 2200;
+                // If this move consumes the final active fruit, avoid treating it as path failure.
+                score += 200;
+            }
+
+            if (ateFruitNow){
+                score -= 1200;
             }
 
             if (tailDistance < 0){
                 score += 1200;
+            }
+
+            if (safeNextMoves == 1){
+                score += 160;
             }
 
             score -= openArea * 2;
@@ -527,6 +713,8 @@ public:
         Vector2 bestDir = snake.direction;
         int bestScore = 1000000;
         bool foundMove = false;
+        bool useLookahead = (cellCountX * cellCountY) <= lookaheadCellThreshold;
+        vector<bool> initialFruitActiveState = BuildFruitActiveState();
 
         for (int i = 0; i < 4; i++){
             Vector2 dir = options[i];
@@ -536,26 +724,40 @@ public:
             if (IsCellBlockedForMove(nextPos)) continue;
 
             deque<Vector2> simulatedBody = SimulateBodyAfterMove(dir);
-            int pathDistance = -1;
-            for (unsigned int fruitIndex = 0; fruitIndex < fruits.size(); fruitIndex++){
-                if (!fruits[fruitIndex].active) continue;
-                int candidateDistance = GetPathDistance(nextPos, fruits[fruitIndex].position, simulatedBody);
-                if (candidateDistance >= 0 && (pathDistance < 0 || candidateDistance < pathDistance)){
-                    pathDistance = candidateDistance;
-                }
+            vector<bool> simulatedFruitActiveState = initialFruitActiveState;
+            bool pendingGrowth = false;
+            bool ateFruitNow = false;
+            int eatenFruitIndex = GetActiveFruitIndexAtPosition(nextPos, simulatedFruitActiveState);
+            if (eatenFruitIndex >= 0){
+                simulatedFruitActiveState[eatenFruitIndex] = false;
+                pendingGrowth = true;
+                ateFruitNow = true;
             }
+            bool hasRemainingFruit = HasAnyActiveFruit(simulatedFruitActiveState);
+
+            int pathDistance = -1;
+            Vector2 preferredFruitTarget = {0, 0};
+            GetPreferredFruitTarget(nextPos, simulatedBody, simulatedFruitActiveState, preferredFruitTarget, pathDistance);
             int openArea = GetReachableCellCount(nextPos, simulatedBody);
             int spaceNeeded = (int)simulatedBody.size();
             int tailDistance = GetPathDistance(nextPos, simulatedBody.back(), simulatedBody);
-            int safeNextMoves = CountSafeNextMoves(simulatedBody, dir);
-            int futureScore = EvaluateFutureBestScore(simulatedBody, dir);
+            int safeNextMoves = CountSafeNextMoves(simulatedBody, dir, pendingGrowth);
+            int futureScore = useLookahead ? EvaluateFutureBestScore(simulatedBody, dir, pendingGrowth, simulatedFruitActiveState) : 0;
+            int recentVisits = CountRecentVisits(nextPos, 20);
 
             int score = 0;
             if (pathDistance >= 0){
                 score += pathDistance * 18;
             }
+            else if (hasRemainingFruit){
+                score += (tailDistance >= 0) ? 1700 : 2500;
+            }
             else{
-                score += 2500;
+                score += 260;
+            }
+
+            if (ateFruitNow){
+                score -= 1600;
             }
 
             if (openArea < spaceNeeded){
@@ -569,14 +771,37 @@ public:
             if (safeNextMoves == 0){
                 score += 3000;
             }
+            else if (safeNextMoves == 1){
+                score += 220;
+            }
+
+            if (recentVisits > 0){
+                int revisitPenalty = recentVisits * 260;
+                if (botStepsSinceApple > 16){
+                    revisitPenalty += recentVisits * 160;
+                }
+                if (ateFruitNow){
+                    revisitPenalty /= 4;
+                }
+                score += revisitPenalty;
+            }
+
+            if (botStepsSinceApple > 16 && pathDistance >= 0){
+                int urgencyBonus = botStepsSinceApple * 6;
+                if (urgencyBonus > 220) urgencyBonus = 220;
+                score -= urgencyBonus;
+            }
 
             score -= openArea * 2;
             score -= safeNextMoves * 45;
-            score += futureScore / 3;
+            if (useLookahead){
+                score += futureScore / 3;
+            }
 
             // Slight preference for stable movement to avoid jittery turns.
             if (Vector2Equals(dir, snake.direction)){
-                score -= 4;
+                int stabilityBias = (botStepsSinceApple > 12) ? 1 : 4;
+                score -= stabilityBias;
             }
 
             if (score < bestScore){
@@ -586,6 +811,7 @@ public:
             }
         }
 
+        
         if (!foundMove){
             for (int i = 0; i < 4; i++){
                 Vector2 dir = options[i];
@@ -683,7 +909,7 @@ public:
             }
         }
 
-        if (stage >= 3){
+        if (mapMode == MapMode::Classic && stage >= 3){
             poisonActive = true;
             poisonPos = GenerateRandomPos(snake.body, true, false);
         }
@@ -838,6 +1064,12 @@ int main(){
         DrawText(text, x, y, fontSize, color);
     };
 
+    auto DrawRightAlignedText = [&](const char* text, int y, int fontSize, int rightPadding, Color color){
+        int textWidth = MeasureText(text, fontSize);
+        int x = GetScreenWidth() - rightPadding - textWidth;
+        DrawText(text, x, y, fontSize, color);
+    };
+
     while (WindowShouldClose() == false){
         float frameTime = GetFrameTime();
         BeginDrawing();
@@ -879,19 +1111,19 @@ int main(){
 
             ClearBackground(green);
             DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * menuMapWidth + 10, (float)cellSize * menuMapHeight + 10}, 5, darkGreen);
-            int menuCenterY = GetScreenHeight() / 2;
-            DrawCenteredText("Retro Snake", menuCenterY - 200, 52, darkGreen);
-            DrawCenteredText("Select Mode", menuCenterY - 145, 30, darkGreen);
+            int menuCenterY = GetScreenHeight() / 2 - 24;
+            DrawCenteredText("Retro Snake", menuCenterY - 190, 46, darkGreen);
+            DrawCenteredText("Select Mode", menuCenterY - 140, 26, darkGreen);
             Color playColor = (menuSelection == 0) ? darkGreen : wallGreen;
             Color botColor = (menuSelection == 1) ? darkGreen : wallGreen;
-            DrawCenteredText("Play", menuCenterY - 95, 32, playColor);
-            DrawCenteredText("Watch Bot", menuCenterY - 50, 32, botColor);
-            DrawCenteredText("Enter/Space to start", menuCenterY - 8, 20, darkGreen);
+            DrawCenteredText("Play", menuCenterY - 98, 28, playColor);
+            DrawCenteredText("Watch Bot", menuCenterY - 58, 28, botColor);
+            DrawCenteredText("Enter/Space to start", menuCenterY - 14, 18, darkGreen);
             const char* modeLabel = (selectedMapMode == MapMode::Expanding) ? "Expanding Map" : "Classic Map";
-            DrawCenteredText(TextFormat("Map Mode: %s", modeLabel), menuCenterY + 36, 28, darkGreen);
-            DrawCenteredText("A/Left: Classic   D/Right: Expanding", menuCenterY + 74, 20, darkGreen);
-            DrawCenteredText(TextFormat("Classic Size: %ix%i", selectedClassicMapWidth, selectedClassicMapHeight), menuCenterY + 105, 24, darkGreen);
-            DrawCenteredText("Q/E width  Z/C height", menuCenterY + 138, 20, darkGreen);
+            DrawCenteredText(TextFormat("Map Mode: %s", modeLabel), menuCenterY + 28, 24, darkGreen);
+            DrawCenteredText("A/Left: Classic   D/Right: Expanding", menuCenterY + 62, 18, darkGreen);
+            DrawCenteredText(TextFormat("Classic Size: %ix%i", selectedClassicMapWidth, selectedClassicMapHeight), menuCenterY + 94, 22, darkGreen);
+            DrawCenteredText("Q/E width  Z/C height", menuCenterY + 126, 18, darkGreen);
         }
         else{
             if (IsKeyPressed(KEY_M) || IsKeyPressed(KEY_ESCAPE)){
@@ -974,20 +1206,20 @@ int main(){
             // Drawing
             ClearBackground(green);
             DrawRectangleLinesEx(Rectangle{(float)offset - 5, (float)offset - 5, (float)cellSize * cellCountX + 10, (float)cellSize * cellCountY + 10}, 5, darkGreen);
-            DrawCenteredText("Retro Snake", 20, 40, darkGreen);
-            DrawCenteredText(TextFormat("Stage %i", game.stage), 65, 34, darkGreen);
-            DrawCenteredText((game.mapMode == MapMode::Expanding) ? "Expanding" : "Classic", 102, 24, darkGreen);
-            DrawCenteredText(TextFormat("Map %ix%i", cellCountX, cellCountY), 132, 24, darkGreen);
-            DrawCenteredText(TextFormat("Score %i", game.score), GetScreenHeight() - 90, 34, darkGreen);
-            DrawCenteredText("P to pause/resume   Esc to menu", GetScreenHeight() - 52, 20, darkGreen);
+            DrawText("Retro Snake", 20, 18, 32, darkGreen);
+            DrawText(TextFormat("Stage %i", game.stage), 22, 56, 24, darkGreen);
+            DrawText((game.mapMode == MapMode::Expanding) ? "Expanding" : "Classic", 22, 84, 20, darkGreen);
+            DrawText(TextFormat("Map %ix%i", cellCountX, cellCountY), 22, 108, 20, darkGreen);
+            DrawRightAlignedText(TextFormat("Score %i", game.score), 22, 24, 24, darkGreen);
+            DrawRightAlignedText("P to pause/resume   Esc to menu", 50, 18, 24, darkGreen);
             if (botMode && !game.running){
-                DrawCenteredText("Press Enter to restart bot", GetScreenHeight() - 26, 20, darkGreen);
+                DrawRightAlignedText("Press Enter to restart bot", 76, 18, 24, darkGreen);
             }
             if (paused){
-                int pausedWidth = MeasureText("PAUSED", 50);
+                int pausedWidth = MeasureText("PAUSED", 44);
                 int pausedX = (GetScreenWidth() - pausedWidth) / 2;
-                int pausedY = (GetScreenHeight() - 50) / 2;
-                DrawText("PAUSED", pausedX, pausedY, 50, darkGreen);
+                int pausedY = (GetScreenHeight() - 44) / 2;
+                DrawText("PAUSED", pausedX, pausedY, 44, darkGreen);
             }
             game.Draw(interpolationAlpha);
         }
