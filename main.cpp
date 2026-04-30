@@ -634,8 +634,8 @@ public:
 
         return safeMoves;
     }
-    // Estimates the best move quality one turn ahead from a hypothetical state
-    int EvaluateFutureBestScore(const deque<Vector2>& stateBody, Vector2 stateDirection, bool pendingGrowth, const vector<bool>& fruitActiveState){
+    // Estimates move quality by recursively looking ahead through hypothetical future states.
+    int EvaluateFutureBestScore(const deque<Vector2>& stateBody, Vector2 stateDirection, bool pendingGrowth, const vector<bool>& fruitActiveState, int lookaheadDepth){
         if (stateBody.empty()) return 100000;
 
         Vector2 options[4] = {Vector2{1, 0}, Vector2{-1, 0}, Vector2{0, 1}, Vector2{0, -1}};
@@ -698,6 +698,13 @@ public:
             score -= openArea * 2;
             score -= safeNextMoves * 40;
 
+            if (lookaheadDepth > 1){
+                int deeperScore = EvaluateFutureBestScore(nextBody, dir, nextPendingGrowth, nextFruitActiveState, lookaheadDepth - 1);
+                if (deeperScore < 100000){
+                    score += deeperScore / 2;
+                }
+            }
+
             if (score < bestFutureScore){
                 bestFutureScore = score;
                 foundFuture = true;
@@ -713,7 +720,17 @@ public:
         Vector2 bestDir = snake.direction;
         int bestScore = 1000000;
         bool foundMove = false;
-        bool useLookahead = (cellCountX * cellCountY) <= lookaheadCellThreshold;
+        int mapCells = cellCountX * cellCountY;
+        bool useLookahead = mapCells <= lookaheadCellThreshold;
+        int lookaheadDepth = 1;
+        if (useLookahead){
+            if (mapCells <= 450){
+                lookaheadDepth = 3;
+            }
+            else if (mapCells <= 900){
+                lookaheadDepth = 2;
+            }
+        }
         vector<bool> initialFruitActiveState = BuildFruitActiveState();
 
         for (int i = 0; i < 4; i++){
@@ -742,7 +759,7 @@ public:
             int spaceNeeded = (int)simulatedBody.size();
             int tailDistance = GetPathDistance(nextPos, simulatedBody.back(), simulatedBody);
             int safeNextMoves = CountSafeNextMoves(simulatedBody, dir, pendingGrowth);
-            int futureScore = useLookahead ? EvaluateFutureBestScore(simulatedBody, dir, pendingGrowth, simulatedFruitActiveState) : 0;
+            int futureScore = useLookahead ? EvaluateFutureBestScore(simulatedBody, dir, pendingGrowth, simulatedFruitActiveState, lookaheadDepth) : 0;
             int recentVisits = CountRecentVisits(nextPos, 20);
 
             int score = 0;
